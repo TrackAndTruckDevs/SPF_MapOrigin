@@ -1,0 +1,284 @@
+/**                                                                                               
+* @file SPF_Hooks_API.h                                                                          
+* @brief API for memory pattern scanning and function hooking.
+*                                                                                                 
+* @details This API provides plugins with the power to intercept and modify the 
+* behavior of the game engine. By using pattern scanning (signatures), hooks 
+* remain stable across game updates. It relies on a high-performance detour 
+* mechanism to redirect game logic to your custom C++ functions.
+*                                                                                                 
+* ================================================================================================
+* KEY CONCEPTS                                                                                    
+* ================================================================================================
+*                                                                                                 
+* 1. **Signature Scanning**: Find target functions using unique byte patterns. This 
+*    avoids hardcoded memory addresses that change every update. 
+*    The pattern scanning syntax supports:
+*    - **Exact Bytes**: Standard hex values (e.g., `48 89 5C`).
+*    - **Wildcards**: Use `?` or `??` to match any byte (e.g., `48 8B ?? ?? ??`).
+*    - **Ranges**: Use `[XX-YY]` to match a byte within a hex range (e.g., `[40-7F]`).
+*      This is particularly useful for matching ModR/M bytes to filter out 
+*      RIP-relative addressing (which usually ends in `05`, `0D`, `15`, etc.).
+*                                                                                                 
+* 2. **Detours**: Your custom function that executes instead of the original. 
+*    It MUST match the original signature exactly.
+*                                                                                                 
+* 3. **Trampolines**: A pointer to the original game code. Always call the 
+*    trampoline from your detour unless you intentionally want to block game logic.
+*                                                                                                 
+* 4. **ABI Safety**: Hooks are registered via handles, ensuring that adding or 
+*    removing hooks does not break compatibility with other plugins.
+*                                                                                                 
+* ================================================================================================
+* USAGE EXAMPLE (C++)                                                                             
+* ================================================================================================
+* @code                                                                                           
+* // 1. Original function pointer
+* typedef void (*GameFunc_t)(int);
+* GameFunc_t o_GameFunc = nullptr;
+*
+* // 2. Your detour
+* void MyDetour(int val) {
+*     Log("Intercepted: %d", val);
+*     o_GameFunc(val); // Call original
+* }
+*
+* // 3. Registration
+* api->Hook_Register("SPF_MapOrigin", "HookID", "Friendly Name", &MyDetour, (void**)&o_GameFunc, "48 89...", true);
+* @endcode                                                                                        
+*/ 
+
+#pragma once
+
+#include <stdbool.h> // For bool
+#include <stdint.h> // For uintptr_t
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Opaque handle to a registered hook instance.
+ */
+typedef struct SPF_Hook_Handle SPF_Hook_Handle;
+
+/**
+ * @brief Typedef for the function that finds a function by signature and installs a hook.
+ *
+ * @param pluginName The name of the calling plugin.
+ * @param hookName A unique programmatic name for the hook (e.g., "SPF_MapOrigin_TrafficHook").
+ * @param displayName A user-friendly name for display in UI menus.
+ * @param pDetour A pointer to your detour function. This function will be called instead
+ *                of the original. It must match the original function's signature.
+ * @param ppOriginal A pointer to a function pointer variable. The framework will store the
+ *                   address of the trampoline here. You must use this to call the
+ *                   original function from your detour.
+ * @param signature A string representing the byte pattern for the hook target.
+ * @param isEnabled The initial enabled state of the hook.
+ * @return A handle to the hook, or NULL on failure. The framework manages the memory.
+ */
+typedef SPF_Hook_Handle* (*SPF_Hook_Register_t)(const char* pluginName, const char* hookName, const char* displayName, void* pDetour, void** ppOriginal, const char* signature, bool isEnabled);
+
+/**
+ * @brief Finds a byte pattern in the game's memory.
+ *
+ * @param signature A string representing the byte pattern.
+ *                  Supported formats:
+ *                  - `XX`: Exact hex byte (e.g., "48")
+ *                  - `?` or `??`: Wildcard (matches any byte)
+ *                  - `[XX-YY]`: Range (matches any byte from XX to YY, e.g., "[40-7F]")
+ * @return The memory address where the pattern was found, or 0 if not found.
+ */
+typedef uintptr_t (*SPF_Hook_FindPattern_t)(const char* signature);
+
+/**
+ * @brief Finds a byte pattern within a specific memory range.
+ *
+ * @param signature A string representing the byte pattern. Supports wildcards and ranges.
+ * @param startAddress The base address to start searching from.
+ * @param searchLength The size of the memory block to search.
+ * @return The memory address where the pattern was found, or 0 if not found.
+ */
+typedef uintptr_t (*SPF_Hook_FindPatternFrom_t)(const char* signature, uintptr_t startAddress, size_t searchLength);
+
+/**
+ * @brief Checks if a hook is currently enabled in the configuration.
+ * @param h The handle to the hook instance.
+ * @return True if the hook is enabled, false otherwise.
+ */
+typedef bool (*SPF_Hook_IsEnabled_t)(SPF_Hook_Handle* h);
+
+/**
+ * @brief Checks if a hook is currently installed (i.e., active in memory).
+ * @param h The handle to the hook instance.
+ * @return True if the hook is installed, false otherwise.
+ */
+typedef bool (*SPF_Hook_IsInstalled_t)(SPF_Hook_Handle* h);
+
+/**
+ * @brief Reads a 32-bit integer from a specific memory address.
+ * @param address The absolute memory address to read from.
+ * @return The 32-bit integer value, or 0 if the address is null.
+ */
+typedef int32_t (*SPF_Memory_ReadInt32_t)(uintptr_t address);
+
+/**
+ * @brief Reads an 8-bit integer (byte) from a specific memory address.
+ * @param address The absolute memory address to read from.
+ * @return The 8-bit integer value, or 0 if the address is null.
+ */
+typedef int8_t (*SPF_Memory_ReadInt8_t)(uintptr_t address);
+
+/**
+ * @brief Reads a 64-bit integer from a specific memory address.
+ * @param address The absolute memory address to read from.
+ * @return The 64-bit integer value, or 0 if the address is null.
+ */
+typedef int64_t (*SPF_Memory_ReadInt64_t)(uintptr_t address);
+
+/**
+ * @brief Reads a 32-bit floating-point value from a specific memory address.
+ * @param address The absolute memory address to read from.
+ * @return The float value, or 0.0f if the address is null.
+ */
+typedef float (*SPF_Memory_ReadFloat_t)(uintptr_t address);
+
+/**
+ * @brief Calculates an absolute address from a RIP-relative instruction (x64).
+ *
+ * @details In x64 architecture, many instructions use relative addressing from the 
+ *          current Instruction Pointer (RIP). This function resolves the final 
+ *          absolute address.
+ *
+ * @param instructionAddr The starting address of the instruction (e.g., found via pattern).
+ * @param offsetPos The byte offset within the instruction where the 32-bit displacement is located.
+ * @param instructionSize The total size of the instruction in bytes.
+ * @return The resolved absolute address.
+ *
+ * @code
+ * // Example: mov rax, [rip + 0x123456] -> instruction is 7 bytes, offset starts at byte 3
+ * uintptr_t addr = api->Memory_GetRipAddress(patternAddr, 3, 7);
+ * @endcode
+ */
+typedef uintptr_t (*SPF_Memory_GetRipAddress_t)(uintptr_t instructionAddr, int offsetPos, int instructionSize);
+
+
+/**
+ * @struct SPF_Hooks_API
+ * @brief C-style API for finding memory patterns and hooking game functions.
+ *
+ * @details This API provides plugins with the ability to intercept and execute custom
+ *          code before, after, or instead of a native game function. It uses
+ *          pattern scanning to find functions in memory and relies on MinHook
+ *          for creating the low-level hooks.
+ *
+ * @section Core Concepts
+ * 1.  **Signature**: A unique sequence of bytes representing the beginning of a
+ *     function in memory. This is used to find the function's address, which
+ *     can change between game updates. Supports exact bytes, wildcards (`?` or `??`),
+ *     and hex ranges (`[XX-YY]`) for advanced instruction matching.
+ * 2.  **Detour**: Your C++ function that will be executed when the game tries to
+ *     call the original function. It MUST have the exact same function signature
+ *     (calling convention, parameters, and return type) as the function you are hooking.
+ * 3.  **Trampoline (`ppOriginal`)**: A pointer to a small piece of executable code
+ *     generated by the hooking library. This trampoline, when called, executes the
+ *     original game function. You **must** call the original function via this
+ *     pointer from your detour to ensure the game continues to function correctly.
+ *
+ * @section Workflow
+ * 1.  **Find Signature**: Using a disassembler or memory scanner (like Ghidra, x64dbg,
+ *     or Cheat Engine), find the target function and identify a unique byte
+ *     pattern at its start.
+ * 2.  **Define Function Type**: In your C++ code, define a type for a function
+ *     pointer that matches the original function's signature.
+ * 3.  **Implement Detour**: Write your detour function. It should accept the same
+ *     parameters and return the same type as the original. Inside this function,
+ *     you can add your custom logic.
+ * 4.  **Call the Original**: Inside your detour, you must call the original function
+ *     using the trampoline pointer provided by the `Hook_Register` function. This is
+ *     critical to avoid crashing the game.
+ * 5.  **Register Hook**: In your plugin's `OnActivated` function, call `Hook_Register`,
+ *     providing the signature, pointers to your detour and trampoline, and other
+ *     metadata. The framework will then find the function and install the hook.
+ *
+ * @section Example
+ * @code{.cpp}
+ * // 1. Define the original function's signature
+ * using MyFunction_t = void(*)(int, bool);
+ *
+ * // 2. Create a global pointer for the trampoline
+ * static MyFunction_t o_MyFunction = nullptr;
+ *
+ * // 3. Implement your detour
+ * void Detour_MyFunction(int param1, bool param2) {
+ *     // Your custom logic here...
+ *     Log("MyFunction was called!");
+ *
+ *     // 4. Call the original function
+ *     return o_MyFunction(param1, param2);
+ * }
+ *
+ * // 5. In OnActivated:
+ * void OnActivated(const SPF_Core_API* core) {
+ *     core->hooks->Hook_Register(
+ *         "SPF_MapOrigin",
+ *         "MyFunctionHook",
+ *         "My Function Hook",
+ *         &Detour_MyFunction,
+ *         (void**)&o_MyFunction,
+ *         "48 89 5C 24 ? 57 48 83 EC 60",
+ *         true
+ *     );
+ * }
+ * @endcode
+ */
+// The API struct that the framework provides to the plugin.
+typedef struct {
+    /**
+     * @brief Finds a function by its byte signature and installs a hook.
+     *
+     * @param pluginName The name of the calling plugin.
+     * @param hookName A unique programmatic name for the hook (e.g., "SPF_MapOrigin_TrafficHook").
+     * @param displayName A user-friendly name for display in UI menus.
+     * @param pDetour A pointer to your detour function. This function will be called instead
+     *                of the original. It must match the original function's signature.
+     * @param ppOriginal A pointer to a function pointer variable. The framework will store the
+     *                   address of the trampoline here. You must use this to call the
+     *                   original function from your detour.
+     * @param signature A string representing the byte pattern for the hook target.
+     * @param isEnabled The initial enabled state of the hook.
+     * @return A handle to the hook, or NULL on failure. The framework manages the memory.
+     */
+    SPF_Hook_Register_t Hook_Register;
+    SPF_Hook_FindPattern_t Hook_FindPattern;
+
+    /**
+     * @brief Finds a byte pattern within a specific memory range.
+     *
+     * @param signature A string representing the byte pattern.
+     * @param startAddress The base address to start searching from.
+     * @param searchLength The size of the memory block to search.
+     * @return The memory address where the pattern was found, or 0 if not found.
+     */
+    SPF_Hook_FindPatternFrom_t Hook_FindPatternFrom;
+
+    SPF_Hook_IsEnabled_t Hook_IsEnabled;
+    SPF_Hook_IsInstalled_t Hook_IsInstalled;
+
+    /**
+     * @brief Safe memory reading and RIP-relative address resolution.
+     * @section Memory Access API
+     */
+    SPF_Memory_ReadInt32_t Memory_ReadInt32;
+    SPF_Memory_ReadInt8_t Memory_ReadInt8;
+    SPF_Memory_ReadInt64_t Memory_ReadInt64;
+    SPF_Memory_ReadFloat_t Memory_ReadFloat;
+    SPF_Memory_GetRipAddress_t Memory_GetRipAddress;
+} SPF_Hooks_API;
+
+
+
+
+#ifdef __cplusplus
+}
+#endif
